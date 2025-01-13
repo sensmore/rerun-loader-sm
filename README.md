@@ -9,5 +9,12 @@ See https://rerun.io/docs/getting-started/installing-viewer
 ## Installation or Usage of Sensmore Data Loader
 
 ```bash
+# TODO: maybe do not install complete python but use uv run ...
 uv pip install .
+```
+
+After that check that the following works
+
+```bash
+rerun-loader-sm
 ```
