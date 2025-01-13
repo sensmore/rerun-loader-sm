@@ -1,0 +1,20 @@
+[project]
+name = "rerun-loader-sm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "unstablecursor", email = "deniz.aksoy@sensmore.ai" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "rerun-sdk",
+    "h5py",
+]
+
+[project.scripts]
+rerun-loader-sm = "rerun_loader_sm.rerun_loader:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
