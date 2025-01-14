@@ -13,7 +13,8 @@ dependencies = [
 ]
 
 [project.scripts]
-rerun-loader-sm = "rerun_loader_sm.rerun_loader:main"
+rerun-loader-sm = "rerun_loader_sm.rerun_loader:main_loader"
+rerun-viewer-sm = "rerun_loader_sm.rerun_loader:main_standalone"
 
 [build-system]
 requires = ["hatchling"]
