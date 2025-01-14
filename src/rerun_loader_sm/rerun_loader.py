@@ -19,7 +19,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        # logging.StreamHandler(sys.stderr),  # Log to stderr
+        logging.StreamHandler(sys.stderr),  # Log to stderr
         logging.FileHandler(log_file)      # Log to the specified file
     ]
 )
@@ -35,7 +35,10 @@ class LogConfig:
     static: bool = False
     time: Optional[List[str]] = None
     sequence: Optional[List[str]] = None
-    
+
+@dataclass
+class ConnectionConfig:
+    address:str | None = None # address to connect to - None for default
 
 def rr_set_time_from_config(log_config:LogConfig) -> None:
     if not log_config.timeless and log_config.time is not None:
@@ -162,6 +165,17 @@ def load_hdf5_file(log_config: LogConfig):
         print(f"Error opening file: {e}")
 
 
+def load_example_cloud(log_config):
+    points = np.random.random((100,3))
+    logging.info(f"Logging example points with shape {points.shape}")
+    rr.log(
+        get_path(log_config, "example_cloud"),
+        rr.Points3D(points, radii=0.1, colors=[255, 0, 0]),
+        static=True,
+        timeless=True
+    )
+
+
 def load_file(log_config: LogConfig):
     file = Path(log_config.filepath)
     if not file.exists():
@@ -221,10 +235,20 @@ def run(standalone=False):
     )
     # Additonal parameters
     parser.add_argument(
+        "--addr",
+        help="Address to connect to",
+    )
+    parser.add_argument(
         "--standalone",
         action="store_true",
         default=standalone,
         help="Use as standalone rerun viewer which starts rerun, i.e. not a dataloader",
+    )
+    parser.add_argument(
+        "--example",
+        action="store_true",
+        default=False,
+        help="Log out an example",
     )
     args = parser.parse_args()
 
@@ -244,12 +268,22 @@ def run(standalone=False):
         sequence=args.sequence,
     )
     
+    con_config = ConnectionConfig(
+        address=args.addr or None
+    )
+    
     logging.info(f"Parameters: {log_config}")
     
     if args.standalone:
         logging.info("Starting rerun-viewer-sm in standalone mode")
-        rr.init(log_config.application_id, recording_id=log_config.recording_id, 
-                spawn=True)
+        if con_config.address is None:
+            logging.info("Spawn and init new rerun")
+            rr.init(log_config.application_id, recording_id=log_config.recording_id, 
+                    spawn=True)
+        else:
+            rr.init(log_config.application_id, recording_id=log_config.recording_id)
+            logging.info(f"Connect to existing rerun at {con_config.address}")
+            rr.connect_tcp(con_config.address)
     else:
         logging.info("Starting rerun-loader-sm in data loader mode")
         rr.init(log_config.application_id, recording_id=log_config.recording_id)
@@ -258,6 +292,11 @@ def run(standalone=False):
         rr.stdout()
     
     set_time_from_args(args)
+    
+    # Handle the example case
+    if args.example:
+        load_example_cloud(log_config)
+        sys.exit(0)  # Exit code 0 indicates success
 
     try:
         load_file(log_config)
