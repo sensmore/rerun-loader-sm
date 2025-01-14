@@ -46,7 +46,9 @@ Then restart the finder by closing the windows.
 You can open them in finder by
 `Right Click on File orFolder -> Quick Actions -> Open in Rerun`
 
-TODO: diretly use open dialgo
+TODO: 
+- diretly use open dialog in finder
+- install this during package installation
 
 ## Installation for Development
 
