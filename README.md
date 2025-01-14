@@ -21,6 +21,33 @@ After that check that the following works
 rerun-loader-sm
 ```
 
+## Opening form CLI
+
+```bash
+rerun PATH_TO_FILE_OR_FOLDER
+```
+
+## Opening form Rerun
+Open rerun and click on menu in top right, then
+```
+Top Menu -> Open -> Select the File or Folder
+```
+
+
+## Opening in Finder
+
+### Installation
+Currently, done via quick aciton. Add the action by copying the workflow. 
+```bash
+cp -r "macos/Open in Rerun.workflow" "$HOME/Library/Services/"
+```
+Then restart the finder by closing the windows. 
+### Usage
+You can open them in finder by
+`Right Click on File orFolder -> Quick Actions -> Open in Rerun`
+
+TODO: diretly use open dialgo
+
 ## Installation for Development
 
 ```bash
