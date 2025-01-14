@@ -60,7 +60,47 @@ class FileTypeError(Exception):
     def __init__(self, message="Cannot Load this file"):
         self.message = message
         super().__init__(self.message)
+        
 
+
+
+def is_python_file(filepath:Path):
+    return filepath.is_file() and filepath.suffix == ".py"
+
+def get_path(log_config: LogConfig, path):
+    if log_config.entity_path_prefix is None or log_config.entity_path_prefix == "":
+        return path
+    else:
+        return f"{log_config.entity_path_prefix}/{path}"
+
+def load_python_file(log_config: LogConfig):
+    file = Path(log_config.filepath)
+    logging.info(f"Load python file: {file}")
+    with file.open(encoding="utf8") as f:
+        body = f.read()
+        text = f"""# Python code\n```python\n{body}\n```\n"""
+        rr.log(
+            get_path(log_config, file.stem), 
+            rr.TextDocument(text, media_type=rr.MediaType.MARKDOWN), 
+            static=log_config.static or log_config.timeless
+        )
+
+
+def set_time_from_args(args) -> None:
+    if not args.timeless and args.time is not None:
+        for time_str in args.time:
+            parts = time_str.split("=")
+            if len(parts) != 2:
+                continue
+            timeline_name, time = parts
+            rr.set_time_nanos(timeline_name, int(time))
+
+        for time_str in args.sequence:
+            parts = time_str.split("=")
+            if len(parts) != 2:
+                continue
+            timeline_name, time = parts
+            rr.set_time_sequence(timeline_name, int(time))
 
 def is_hdf5_file(filepath: Path):
     """
@@ -96,11 +136,12 @@ def load_hdf5_to_cloud(hf, key: str, log_config: LogConfig):
             f"Loading key {key} to cloud with shape {data.shape} to {type(data)}"
         )
         points_xyz = data[:, 0:3]
-        points_label = data[:, 3]
-        print(points_xyz)
+        logging.info(points_xyz)
         rr.log(
-            f"{log_config.entity_path_prefix}/{key}",
-            rr.Points3D(points_xyz, radii=2.0, colors=[255, 0, 0]),
+            get_path(log_config, key),
+            rr.Points3D(points_xyz, radii=0.1, colors=[255, 0, 0]),
+            static=True,
+            timeless=True
         )
     else:
         raise KeyError(f"Dataset key '{key}' not found in the file.")
@@ -121,15 +162,19 @@ def load_hdf5_file(log_config: LogConfig):
         print(f"Error opening file: {e}")
 
 
-def load_dataset(log_config: LogConfig):
-    if not Path(log_config.filepath).exists():
+def load_file(log_config: LogConfig):
+    file = Path(log_config.filepath)
+    if not file.exists():
         logging.info(f"{log_config.filepath} does not exist.")
         raise FileNotFoundError(
             f"Cannot load file: {log_config.filepath} does not exist."
         )
-    if is_hdf5_file(log_config.filepath):
+    if is_python_file(file):
+        load_python_file(log_config)
+    elif is_hdf5_file(file):
         load_hdf5_file(log_config)
     else:
+        logging.info(f"Cannot load this file type: {file}")
         raise FileTypeError("Cannot load this file")
 
 
@@ -211,12 +256,14 @@ def run(standalone=False):
         # The most important part of this: log to standard output so the Rerun Viewer 
         # can ingest it!
         rr.stdout()
+    
+    set_time_from_args(args)
 
     try:
-        load_dataset(log_config)
+        load_file(log_config)
         sys.exit(0)  # Exit code 0 indicates success
     except Exception as e:
-        logging.error("Starting rerun-loader-sm in data loader mode")
+        logging.error(f"Error loading file {e}")
         sys.exit(rr.EXTERNAL_DATA_LOADER_INCOMPATIBLE_EXIT_CODE)
         
 def main_loader():
