@@ -126,7 +126,7 @@ def is_pickled_dict(filepath: Path) -> bool:
             is_dict = isinstance(data[0], dict)
             is_expected_filetype = is_list and is_dict
             logging.info(f"Is list dict in pickle is_list={is_list} is_dict={is_dict}")
-    except (pickle.UnpicklingError, EOFError, FileNotFoundError, IsADirectoryError, PermissionError):
+    except (pickle.UnpicklingError, EOFError, FileNotFoundError, IsADirectoryError, PermissionError, ValueError):
         logging.info(f"Error during unpickling: {filepath}")
         is_expected_filetype = False
     logging.info(f"Is pickled dict {filepath}: {is_expected_filetype}")
