@@ -11,6 +11,9 @@ from typing import List, Optional, Type  # keep it backward compatible!
 import sys
 import logging
 import yaml
+import traceback
+import pickle
+
 
 
 from rerun_loader_sm.loader.kitti.kitti_loader import read_kitti_bin, KittiLoader
@@ -27,6 +30,14 @@ logging.basicConfig(
         logging.FileHandler(log_file)      # Log to the specified file
     ]
 )
+
+# TODO: optimize: often file is already loaded during testing
+# TODO: logs are very needed when making different checks on files but sometimes
+# the cheks are needed internally without out -> provide optional logging instance to
+# function 
+
+
+
 
 @dataclass
 class KittiLoaderConfig:
@@ -101,10 +112,58 @@ def log_dynamic_cloud_by_sequence_idx(log_config:LogConfig, key:str, seq_idx:int
         get_path(log_config, key),
         rr.Points3D(points_xyz, radii=0.1, colors=[255, 0, 0]),
     )
-        
+
+
+def is_pickled_dict(filepath: Path) -> bool:
+    logging.info(f"Checking if it is pickle file {filepath}")
+    if not filepath.is_file() and filepath.suffix != '.pickle':
+        logging.info(f"Not picke file since not a file ending in .pickle {filepath}")
+        is_expected_filetype = False
+    try:
+        with filepath.open('rb') as file:
+            data = pickle.load(file)
+            is_list = isinstance(data, list)
+            is_dict = isinstance(data[0], dict)
+            is_expected_filetype = is_list and is_dict
+            logging.info(f"Is list dict in pickle is_list={is_list} is_dict={is_dict}")
+    except (pickle.UnpicklingError, EOFError, FileNotFoundError, IsADirectoryError, PermissionError):
+        logging.info(f"Error during unpickling: {filepath}")
+        is_expected_filetype = False
+    logging.info(f"Is pickled dict {filepath}: {is_expected_filetype}")
+    return is_expected_filetype
+
+def iterable_to_array(xs):
+    return lambda xs : np.array(xs)
+
+_trafos = {
+    'idx': lambda x : x, 
+    'positive_idxs': iterable_to_array,
+    'negative_idx': iterable_to_array,
+    'hard_idxs': iterable_to_array,
+}
+
+
+def load_pickled_dict(log_config:LogConfig):
+    logging.info(f"Loading pickeled dict {log_config.filepath}")
+    filepath = Path(log_config.filepath)
+    with filepath.open('rb') as file:
+        data = pickle.load(file)
+    logging.info(f"Unpickled data of length {len(data)}")
+    
+    for i, dict_obj in enumerate(data):
+        rr.set_time_sequence("frame_nr", i)
+        for key in dict_obj:       
+            val = str(dict_obj[key])
+            rr.log(
+                get_path(log_config, log_config.filepath, key),
+                rr.TextLog(str(val))
+            )
+    logging.info("Loading pickeled dict done")
         
 def is_single_kitti_cloud_file(filepath:Path):
+    logging.info(f"Checking if is single kitti cloud file {filepath}")
     if not filepath.is_file():
+        logging.info(f"Not kitti cloud file since not a file {filepath}")
         is_cloud_file = False
     else:
         try:
@@ -115,6 +174,7 @@ def is_single_kitti_cloud_file(filepath:Path):
             is_cloud_file =  False
     if not is_cloud_file:
         logging.info(f"Not a single kitti cloud file: {filepath}")
+    logging.info(f"Is single kitti cloud file: {is_cloud_file}")
     return is_cloud_file
 
 def load_single_kitti_cloud_file(log_config:LogConfig):
@@ -157,7 +217,7 @@ def is_kitti_dataset(filepath:Path):
 def _get_numbers_from_numerated_files(folder_path:Path, suffix:str = ".bin"):
     # Get the numbers 
     numbers = sorted(
-        int(file.stem) for file in Path(folder_path).iterdir() if file.suffix == suffix and file.is_file()
+        int(file.stem) for file in Path(folder_path).iterdir() if file.suffix == suffix and file.is_file() and file.stem.isdigit()
     )
     return numbers
 
@@ -254,9 +314,10 @@ def load_kitti_dataset(log_config):
 def is_python_file(filepath:Path):
     return filepath.is_file() and filepath.suffix == ".py"
 
-def get_path(log_config: LogConfig, path):
+def get_path(log_config: LogConfig, path, *more_path_parts):
+    relative_path_str = '/'.join([path, *more_path_parts])
     if log_config.entity_path_prefix is None or log_config.entity_path_prefix == "":
-        return path
+        return relative_path_str
     else:
         return f"{log_config.entity_path_prefix}/{path}"
 
@@ -370,6 +431,8 @@ def load_file(log_config: LogConfig):
         )
     if is_python_file(file):
         load_python_file(log_config)
+    elif is_pickled_dict(file):
+        load_pickled_dict(log_config)
     elif is_kitti_dataset(file):
         load_kitti_dataset(log_config)
     elif is_single_kitti_cloud_file(file):
@@ -509,7 +572,8 @@ def run(standalone=False):
         load_file(log_config)
         sys.exit(0)  # Exit code 0 indicates success
     except Exception as e:
-        logging.error(f"Error loading file {e}")
+        logging.error(f"Error loading file: {e} {traceback.format_exc()})")
+        logging.error("Error during loading. Exiting with exitcode to signal load of this filetype is not possible")
         sys.exit(rr.EXTERNAL_DATA_LOADER_INCOMPATIBLE_EXIT_CODE)
         
 def main_loader():
