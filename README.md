@@ -18,7 +18,13 @@ uv tool uninstall rerun-loader-sm
 After that check that the following works
 
 ```bash
+# run this command - it should output some help
 rerun-loader-sm
+
+# run this command - it should display some points
+# you might have to add a view to display the logged 
+# clouds in the rerun GUI
+rerun-viewer-sm --example .
 ```
 
 ## Opening form CLI

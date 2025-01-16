@@ -1,3 +1,6 @@
-cloud_start: 0
-# cloud_end: .inf
-cloud_end: 10000
+connection:
+  address: null
+forced_loader: null
+loader_kitti_config:
+  cloud_end: .inf
+  cloud_start: 0

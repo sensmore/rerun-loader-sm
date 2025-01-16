@@ -6,13 +6,14 @@ import argparse
 import h5py
 from pathlib import Path
 
-from dataclasses import dataclass, field, asdict
+from pydantic import BaseModel, Field
 from typing import List, Optional, Type  # keep it backward compatible!
 import sys
 import logging
 import yaml
 import traceback
 import pickle
+from abc import ABC, abstractmethod
 
 
 
@@ -35,28 +36,24 @@ logging.basicConfig(
 # TODO: logs are very needed when making different checks on files but sometimes
 # the cheks are needed internally without out -> provide optional logging instance to
 # function 
+# TODO: remove _config in Config attributes
 
 
 
 
-@dataclass
-class KittiLoaderConfig:
+class KittiLoaderConfig(BaseModel):
     cloud_start: float = 0
     cloud_end: float = float("inf")
 
-# TODO: better parsing, e.g with pydantic?
-def load_config_from_file(config_path: Path, klass: Type[KittiLoaderConfig] = KittiLoaderConfig) -> KittiLoaderConfig:
-    with config_path.open('r') as file:
-        config_data = yaml.safe_load(file)
-    return klass(**config_data)
+class ConnectionConfig(BaseModel):
+    address: Optional[str] = None  # Address to connect to, None for default
 
-def write_config_to_file(config_path: Path, config_instance) -> None:
-    with config_path.open('w') as file:
-        yaml.safe_dump(asdict(config_instance), file)
+class LoaderConfig(BaseModel):
+    forced_loader: Optional[str] = None
+    loader_kitti_config: KittiLoaderConfig = Field(default_factory=KittiLoaderConfig)
+    connection: ConnectionConfig = Field(default_factory=ConnectionConfig)
 
-# TODO: organize the config better, so we can load useful parts to and from file
-@dataclass
-class LogConfig:
+class LogConfig(BaseModel):
     filepath: str
     application_id: str = "rerun_loader_sm"
     recording_id: Optional[str] = None
@@ -65,11 +62,28 @@ class LogConfig:
     static: bool = False
     time: Optional[List[str]] = None
     sequence: Optional[List[str]] = None
-    loader_kitti_config: KittiLoaderConfig = field(default_factory=KittiLoaderConfig)
+    loader_config: LoaderConfig = Field(default_factory=LoaderConfig)
 
-@dataclass
-class ConnectionConfig:
-    address:str | None = None # address to connect to - None for default
+# TODO: better parsing, e.g with pydantic?
+def load_config_from_file(config_path: Path) -> LoaderConfig:
+    with config_path.open('r') as file:
+        yaml_data = yaml.safe_load(file)
+        return LoaderConfig.model_validate(yaml_data)
+
+def write_config_to_file(config_path: Path, config_instance) -> None:
+    with config_path.open('w') as file:
+        yaml.safe_dump(config_instance.dict(), file)
+
+
+
+class DatasetRerunLoader(ABC):
+    @staticmethod
+    @abstractmethod
+    def is_loadable(filepath:Path) -> bool: ...
+
+    @abstractmethod
+    def log_to_rerun(self, log_config:LogConfig) -> None : ...
+
 
 def rr_set_time_from_config(log_config:LogConfig) -> None:
     if not log_config.timeless and log_config.time is not None:
@@ -114,75 +128,6 @@ def log_dynamic_cloud_by_sequence_idx(log_config:LogConfig, key:str, seq_idx:int
     )
 
 
-def is_pickled_dict(filepath: Path) -> bool:
-    logging.info(f"Checking if it is pickle file {filepath}")
-    if not filepath.is_file() and filepath.suffix != '.pickle':
-        logging.info(f"Not picke file since not a file ending in .pickle {filepath}")
-        is_expected_filetype = False
-    try:
-        with filepath.open('rb') as file:
-            data = pickle.load(file)
-            is_list = isinstance(data, list)
-            is_dict = isinstance(data[0], dict)
-            is_expected_filetype = is_list and is_dict
-            logging.info(f"Is list dict in pickle is_list={is_list} is_dict={is_dict}")
-    except (pickle.UnpicklingError, EOFError, FileNotFoundError, IsADirectoryError, PermissionError, ValueError):
-        logging.info(f"Error during unpickling: {filepath}")
-        is_expected_filetype = False
-    logging.info(f"Is pickled dict {filepath}: {is_expected_filetype}")
-    return is_expected_filetype
-
-def iterable_to_array(xs):
-    return lambda xs : np.array(xs)
-
-_trafos = {
-    'idx': lambda x : x, 
-    'positive_idxs': iterable_to_array,
-    'negative_idx': iterable_to_array,
-    'hard_idxs': iterable_to_array,
-}
-
-
-def load_pickled_dict(log_config:LogConfig):
-    logging.info(f"Loading pickeled dict {log_config.filepath}")
-    filepath = Path(log_config.filepath)
-    with filepath.open('rb') as file:
-        data = pickle.load(file)
-    logging.info(f"Unpickled data of length {len(data)}")
-    
-    for i, dict_obj in enumerate(data):
-        rr.set_time_sequence("frame_nr", i)
-        for key in dict_obj:       
-            val = str(dict_obj[key])
-            rr.log(
-                get_path(log_config, log_config.filepath, key),
-                rr.TextLog(str(val))
-            )
-    logging.info("Loading pickeled dict done")
-        
-def is_single_kitti_cloud_file(filepath:Path):
-    logging.info(f"Checking if is single kitti cloud file {filepath}")
-    if not filepath.is_file():
-        logging.info(f"Not kitti cloud file since not a file {filepath}")
-        is_cloud_file = False
-    else:
-        try:
-            data = read_kitti_bin(filepath)
-            is_cloud_file = data is not None
-        except Exception as e:
-            logging.info(f"Error while trying to load as kitti file: {filepath} - {type(e)}")
-            is_cloud_file =  False
-    if not is_cloud_file:
-        logging.info(f"Not a single kitti cloud file: {filepath}")
-    logging.info(f"Is single kitti cloud file: {is_cloud_file}")
-    return is_cloud_file
-
-def load_single_kitti_cloud_file(log_config:LogConfig):
-    file = Path(log_config.filepath)
-    cloud = read_kitti_bin(file)
-    log_static_cloud(log_config, 'cloud', cloud[:,0:3], cloud[:,3])
-
-
 
 def _create_kitti_loader(path:Path)->KittiLoader:
     velodyne_path = 'velodyne'
@@ -196,22 +141,6 @@ def _create_kitti_loader(path:Path)->KittiLoader:
                     box_folder = str(box_folder))
     logging.info("Created kitti loader")
     return kitti_loader
-
-
-def is_kitti_dataset(filepath:Path):
-    if not filepath.is_dir():
-        logging.info("Not a kitti folder since no directory")
-        is_loadable = False
-    else:
-        try:
-            is_loadable = KittiLoader.can_load(filepath) 
-            logging.info(f"Kitti Loader output can_load = {is_loadable}")
-        except Exception as e:
-            logging.info(f"Error while trying to call KittiLoader.can_load on folder:  {filepath} - {str(e)}")
-            is_loadable =  False
-    if not is_loadable:
-        logging.info(f"Not a kitti folder: {filepath}")
-    return is_loadable
 
 
 def _get_numbers_from_numerated_files(folder_path:Path, suffix:str = ".bin"):
@@ -247,8 +176,6 @@ def _load_kitti_hdf5_clouds(cloud_folder:Path, idx:int)->None | list[tuple[str, 
     return _load_hdf5_clouds(clouds_files[0])
 
 
-def is_npy_file(file_path):
-    return file_path.is_file() and file_path.suffix == '.npy'
 
 def find_subdirs_with_files(parent_dir, file_predicate)->list[Path]:
     """
@@ -273,46 +200,6 @@ def _log_dynamic_cloud_with_pose(log_config, key:str,  seq_idx:int, pose:np.ndar
     points_xyz_transformed = _homegenous_to_cartesian_rows((pose @ _cartesian_to_homogenous_rows(points_xyz).T).T)
     log_dynamic_cloud_by_sequence_idx(log_config, key = key, seq_idx=seq_idx, points_xyz = points_xyz_transformed)
 
-def load_kitti_dataset(log_config):
-    filepath = Path(log_config.filepath)
-    kitti_loader = _create_kitti_loader(filepath)
-    logging.info("Loading KITTI dataset")
-    
-    
-    poses = kitti_loader.poses
-    indices = np.array(_get_numbers_from_numerated_files(kitti_loader.cloud_folder))
-    indices = indices[ (indices>= log_config.loader_kitti_config.cloud_start) & (indices<=log_config.loader_kitti_config.cloud_end)]
-    logging.info(f"Logging numpy subdirectories: {kitti_loader.cloud_folder} with {indices}")
-    
-    for idx in indices:
-        pose = poses[idx, ...]
-        
-        # Load the "normal" cloud of the kitti data
-        points_xyzi = kitti_loader.get_cloud(idx)
-        if points_xyzi is not None:
-            points_xyz = points_xyzi[:,:3]
-            # easy to read by unnessary double transpose
-            points_xyz_transformed = _homegenous_to_cartesian_rows((pose @ _cartesian_to_homogenous_rows(points_xyz).T).T)
-            log_dynamic_cloud_by_sequence_idx(log_config, key = str(kitti_loader.cloud_folder), seq_idx=idx, points_xyz = points_xyz_transformed)
-
-    hdf5_subdirs = find_subdirs_with_files(filepath, is_hdf5_file)
-    logging.info(f"Logging HDF5 subdirectories {hdf5_subdirs} with indincess {indices}")
-    for hdf5_subdir in hdf5_subdirs:
-        for idx in indices:
-            pose = poses[idx, ...]
-            rel_path = hdf5_subdir.relative_to(filepath)
-            
-            # Load the "normal" cloud of the kitti data
-            clouds = _load_kitti_hdf5_clouds(hdf5_subdir, idx)
-            if clouds is None:
-                continue
-            for key, cloud_xyzi in clouds:
-                _log_dynamic_cloud_with_pose(log_config, key=str(rel_path / key), seq_idx=idx, pose=pose, points_xyzi=cloud_xyzi)
-    
-
-
-def is_python_file(filepath:Path):
-    return filepath.is_file() and filepath.suffix == ".py"
 
 def get_path(log_config: LogConfig, path, *more_path_parts):
     relative_path_str = '/'.join([path, *more_path_parts])
@@ -321,17 +208,6 @@ def get_path(log_config: LogConfig, path, *more_path_parts):
     else:
         return f"{log_config.entity_path_prefix}/{path}"
 
-def load_python_file(log_config: LogConfig):
-    file = Path(log_config.filepath)
-    logging.info(f"Load python file: {file}")
-    with file.open(encoding="utf8") as f:
-        body = f.read()
-        text = f"""# Python code\n```python\n{body}\n```\n"""
-        rr.log(
-            get_path(log_config, file.stem), 
-            rr.TextDocument(text, media_type=rr.MediaType.MARKDOWN), 
-            static=log_config.static or log_config.timeless
-        )
 
 
 def set_time_from_args(args) -> None:
@@ -350,6 +226,9 @@ def set_time_from_args(args) -> None:
             timeline_name, time = parts
             rr.set_time_sequence(timeline_name, int(time))
 
+def is_python_file(filepath:Path):
+    return filepath.is_file() and filepath.suffix == ".py"
+
 def is_hdf5_file(filepath: Path):
     try:
         with h5py.File(str(filepath), "r") as _:
@@ -357,58 +236,211 @@ def is_hdf5_file(filepath: Path):
     except (OSError, IOError) as e:
         return False
 
-def is_hdf5_data(filepath: Path):
-    """
-    Check if a given file is a valid HDF5 file.
+def is_npy_file(file_path):
+    return file_path.is_file() and file_path.suffix == '.npy'
 
-    Parameters:
-        filepath (str): The path to the file to check.
-
-    Returns:
-        bool: True if the file is a valid HDF5 file, False otherwise.
-    """
-    try:
-        with h5py.File(str(filepath), "r") as _:
-            logging.info(f"{filepath} is hdf5 file")
-            return True
-    except (OSError, IOError) as e:
-        logging.debug(f"Error: {e}")
-        logging.info(f"Not a hdf5 file: {str(filepath)}")
-        return False
+class KittiSequenceDatasetRerunLoader(DatasetRerunLoader):
+    
+    @staticmethod
+    def is_loadable(filepath:Path):
+        if not filepath.is_dir():
+            logging.info("Not a kitti folder since no directory")
+            is_loadable = False
+        else:
+            try:
+                is_loadable = KittiLoader.can_load(filepath) 
+                logging.info(f"Kitti Loader output can_load = {is_loadable}")
+            except Exception as e:
+                logging.info(f"Error while trying to call KittiLoader.can_load on folder:  {filepath} - {str(e)}")
+                is_loadable =  False
+        if not is_loadable:
+            logging.info(f"Not a kitti folder: {filepath}")
+        return is_loadable
+    
+    def log_to_rerun(self, log_config: LogConfig):
+        filepath = Path(log_config.filepath)
+        kitti_loader = _create_kitti_loader(filepath)
+        logging.info("Loading KITTI dataset")
+        
+        
+        poses = kitti_loader.poses
+        indices = np.array(_get_numbers_from_numerated_files(kitti_loader.cloud_folder))
+        indices = indices[ (indices>= log_config.loader_config.loader_kitti_config.cloud_start) & (indices<=log_config.loader_config.loader_kitti_config.cloud_end)]
+        logging.info(f"Logging numpy subdirectories: {kitti_loader.cloud_folder} with {indices}")
+        
+        for idx in indices:
+            pose = poses[idx, ...]
             
+            # Load the "normal" cloud of the kitti data
+            points_xyzi = kitti_loader.get_cloud(idx)
+            if points_xyzi is not None:
+                points_xyz = points_xyzi[:,:3]
+                # easy to read by unnessary double transpose
+                points_xyz_transformed = _homegenous_to_cartesian_rows((pose @ _cartesian_to_homogenous_rows(points_xyz).T).T)
+                log_dynamic_cloud_by_sequence_idx(log_config, key = str(kitti_loader.cloud_folder), seq_idx=idx, points_xyz = points_xyz_transformed)
 
-def log_hdf5_to_cloud(hf, key: str, log_config: LogConfig):
-    """
-    Load a dataset from an open HDF5 file.
+        hdf5_subdirs = find_subdirs_with_files(filepath, is_hdf5_file)
+        logging.info(f"Logging HDF5 subdirectories {hdf5_subdirs} with indincess {indices}")
+        for hdf5_subdir in hdf5_subdirs:
+            for idx in indices:
+                pose = poses[idx, ...]
+                rel_path = hdf5_subdir.relative_to(filepath)
+                
+                # Load the "normal" cloud of the kitti data
+                clouds = _load_kitti_hdf5_clouds(hdf5_subdir, idx)
+                if clouds is None:
+                    continue
+                for key, cloud_xyzi in clouds:
+                    _log_dynamic_cloud_with_pose(log_config, key=str(rel_path / key), seq_idx=idx, pose=pose, points_xyzi=cloud_xyzi)
 
-    Parameters:
-        hf (h5py.File): Open HDF5 file object.
-        key (str): Key of the dataset to load.
-    """
-    if key in hf:
-        data = hf[key][:]
-        logging.info(
-            f"Loading key {key} to cloud with shape {data.shape} to {type(data)}"
-        )
-        points_xyz = data[:, 0:3]
-        log_static_cloud(log_config, key, points_xyz)
-    else:
-        raise KeyError(f"Dataset key '{key}' not found in the file.")
+class KittiSingleCloudFileRerunLoader(DatasetRerunLoader):
+    
+    @staticmethod
+    def is_loadable(filepath:Path):
+        logging.info(f"Checking if is single kitti cloud file {filepath}")
+        if not filepath.is_file():
+            logging.info(f"Not kitti cloud file since not a file {filepath}")
+            is_cloud_file = False
+        else:
+            try:
+                data = read_kitti_bin(filepath)
+                is_cloud_file = data is not None
+            except Exception as e:
+                logging.info(f"Error while trying to load as kitti file: {filepath} - {type(e)}")
+                is_cloud_file =  False
+        if not is_cloud_file:
+            logging.info(f"Not a single kitti cloud file: {filepath}")
+        logging.info(f"Is single kitti cloud file: {is_cloud_file}")
+        return is_cloud_file
+    
+    def log_to_rerun(self, log_config: LogConfig):
+        file = Path(log_config.filepath)
+        cloud = read_kitti_bin(file)
+        log_static_cloud(log_config, 'cloud', cloud[:,0:3], cloud[:,3])
 
 
-def load_hdf5_file(log_config: LogConfig):
-    """
-    Open an HDF5 file, iterate over its keys, and load datasets.
-    """
-    logging.info(f"Opening HDF5 file: {log_config.filepath}")
-    try:
-        with h5py.File(log_config.filepath, "r") as hf:
-            keys = list(hf.keys())
-            logging.info(f"HDF5 Keys: {list(hf.keys())}")
-            for key in keys:
-                log_hdf5_to_cloud(hf, key, log_config)
-    except Exception as e:
-        print(f"Error opening file: {e}")
+class PythonFileRerunLoader(DatasetRerunLoader):
+    
+    @staticmethod
+    def is_loadable(filepath:Path):
+        return is_python_file(filepath)
+    
+    def log_to_rerun(self, log_config: LogConfig):
+        file = Path(log_config.filepath)
+        logging.info(f"Load python file: {file}")
+        with file.open(encoding="utf8") as f:
+            body = f.read()
+            text = f"""# Python code\n```python\n{body}\n```\n"""
+            rr.log(
+                get_path(log_config, file.stem), 
+                rr.TextDocument(text, media_type=rr.MediaType.MARKDOWN), 
+                static=log_config.static or log_config.timeless
+            )
+
+def iterable_to_array(xs):
+    return lambda xs : np.array(xs)
+
+_trafos = {
+    'idx': lambda x : x, 
+    'positive_idxs': iterable_to_array,
+    'negative_idx': iterable_to_array,
+    'hard_idxs': iterable_to_array,
+}
+
+class PickledDictRerunLoader(DatasetRerunLoader):
+    
+    @staticmethod
+    def is_loadable(filepath:Path):
+        logging.info(f"Checking if it is pickle file {filepath}")
+        if not filepath.is_file() and filepath.suffix != '.pickle':
+            logging.info(f"Not picke file since not a file ending in .pickle {filepath}")
+            is_expected_filetype = False
+        try:
+            with filepath.open('rb') as file:
+                data = pickle.load(file)
+                is_list = isinstance(data, list)
+                is_dict = isinstance(data[0], dict)
+                is_expected_filetype = is_list and is_dict
+                logging.info(f"Is list dict in pickle is_list={is_list} is_dict={is_dict}")
+        except (pickle.UnpicklingError, EOFError, FileNotFoundError, IsADirectoryError, PermissionError, ValueError):
+            logging.info(f"Error during unpickling: {filepath}")
+            is_expected_filetype = False
+        logging.info(f"Is pickled dict {filepath}: {is_expected_filetype}")
+        return is_expected_filetype
+    
+    def log_to_rerun(self, log_config: LogConfig):
+        logging.info(f"Loading pickeled dict {log_config.filepath}")
+        filepath = Path(log_config.filepath)
+        with filepath.open('rb') as file:
+            data = pickle.load(file)
+        logging.info(f"Unpickled data of length {len(data)}")
+        
+        for i, dict_obj in enumerate(data):
+            rr.set_time_sequence("frame_nr", i)
+            for key in dict_obj:       
+                val = str(dict_obj[key])
+                rr.log(
+                    get_path(log_config, log_config.filepath, key),
+                    rr.TextLog(str(val))
+                )
+        logging.info("Loading pickeled dict done")
+
+    
+class HD5CloudRerunLoader(DatasetRerunLoader):
+    
+    @staticmethod
+    def is_loadable(filepath:Path):
+        """
+        Check if a given file is a valid HDF5 file.
+
+        Parameters:
+            filepath (str): The path to the file to check.
+
+        Returns:
+            bool: True if the file is a valid HDF5 file, False otherwise.
+        """
+        try:
+            with h5py.File(str(filepath), "r") as _:
+                logging.info(f"{filepath} is hdf5 file")
+                return True
+        except (OSError, IOError) as e:
+            logging.debug(f"Error: {e}")
+            logging.info(f"Not a hdf5 file: {str(filepath)}")
+            return False
+
+    def log_hdf5_to_cloud(self, hf:h5py.File, key: str, log_config: LogConfig):
+        """
+        Load a dataset from an open HDF5 file.
+
+        Parameters:
+            hf (h5py.File): Open HDF5 file object.
+            key (str): Key of the dataset to load.
+        """
+        if key in hf:
+            data = hf[key][:]
+            logging.info(
+                f"Loading key {key} to cloud with shape {data.shape} to {type(data)}"
+            )
+            points_xyz = data[:, 0:3]
+            log_static_cloud(log_config, key, points_xyz)
+        else:
+            raise KeyError(f"Dataset key '{key}' not found in the file.")
+    
+    def log_to_rerun(self, log_config: LogConfig):
+        """
+        Open an HDF5 file, iterate over its keys, and load datasets.
+        """
+        logging.info(f"Opening HDF5 file: {log_config.filepath}")
+        try:
+            with h5py.File(log_config.filepath, "r") as hf:
+                keys = list(hf.keys())
+                logging.info(f"HDF5 Keys: {list(hf.keys())}")
+                for key in keys:
+                    self.log_hdf5_to_cloud(hf, key, log_config)
+        except Exception as e:
+            print(f"Error opening file: {e}")
+
+
 
 
 def load_example_cloud(log_config):
@@ -429,16 +461,33 @@ def load_file(log_config: LogConfig):
         raise FileNotFoundError(
             f"Cannot load file: {log_config.filepath} does not exist."
         )
-    if is_python_file(file):
-        load_python_file(log_config)
-    elif is_pickled_dict(file):
-        load_pickled_dict(log_config)
-    elif is_kitti_dataset(file):
-        load_kitti_dataset(log_config)
-    elif is_single_kitti_cloud_file(file):
-        load_single_kitti_cloud_file(log_config)
-    elif is_hdf5_data(file):
-        load_hdf5_file(log_config)
+    # TODO: refactor; we need 
+    # - priorities
+    # - fallthrough (one fails - load from other)
+    # - maybe parallel checks - only do easy checks first of all -> use coprocess (yield)
+    rerun_data_loader_classes = [
+        PythonFileRerunLoader,
+        PickledDictRerunLoader,
+        KittiSequenceDatasetRerunLoader,
+        KittiSingleCloudFileRerunLoader,
+        HD5CloudRerunLoader,
+    ]
+    loader_classes_by_name = {cls.__name__: cls for cls in rerun_data_loader_classes}
+    logging.info(f"Consider rerun data loaders: {list(loader_classes_by_name.keys())}")
+    
+    selected_rerun_loader_class = None
+    if log_config.loader_config.forced_loader is not None:
+        logging.info(f"Selecting forced loader: {log_config.loader_config.forced_loader}")
+        selected_rerun_loader_class = loader_classes_by_name[log_config.loader_config.forced_loader]
+    else:
+        for rerun_loader_class in rerun_data_loader_classes:
+            if rerun_loader_class.is_loadable(Path(file)):
+                selected_rerun_loader_class = rerun_loader_class
+                break
+    
+    if selected_rerun_loader_class is not None:
+        rerun_loader = selected_rerun_loader_class()
+        rerun_loader.log_to_rerun(log_config)
     else:
         logging.info(f"Cannot load this file type: {file}")
         raise FileTypeError("Cannot load this file")
@@ -512,12 +561,17 @@ def run(standalone=False):
         type=str,
         help="Path to write the config",
     )
+    parser.add_argument(
+        "--forcedloader",
+        type=str,
+        help="Name of loader to force instead of choosing best loader heuristically",
+    )
     args = parser.parse_args()
     
-    if args.config:
-        kitti_config = load_config_from_file(Path(args.config))
-    else:
-        kitti_config = None
+    # TODO: reorganize this loading with jsonargparse but make sure CLI args stay
+    # exaclty the same; CLI args are interface to rerun when used as loader
+    
+    loader_config = load_config_from_file(Path(args.config)) if args.config else None
 
     default_log_config = LogConfig(
         filepath='.', 
@@ -533,20 +587,20 @@ def run(standalone=False):
         static=args.static,
         time=args.time,
         sequence=args.sequence,
-        loader_kitti_config=kitti_config or default_log_config.loader_kitti_config
+        loader_config=loader_config or default_log_config.loader_config
     )
     
-    con_config = ConnectionConfig(
-        address=args.addr or None
-    )
+    if args.addr is not None:
+        log_config.loader_config.connection.address = args.addr
+
+    if args.forcedloader:
+        log_config.loader_config.forced_loader = args.forcedloader
     
     logging.info(f"Parameters: {log_config}")
-    if args.writeconfig:
-        write_config_to_file(Path(args.writeconfig), log_config.loader_kitti_config)
     
     if args.standalone:
         logging.info("Starting rerun-viewer-sm in standalone mode")
-        if con_config.address is None:
+        if log_config.loader_config.connection.address is None:
             logging.info("Spawn and init new rerun")
             rr.init(log_config.application_id, recording_id=log_config.recording_id, 
                     spawn=True)
@@ -567,6 +621,11 @@ def run(standalone=False):
     if args.example:
         load_example_cloud(log_config)
         sys.exit(0)  # Exit code 0 indicates success
+
+    if args.example:
+        load_example_cloud(log_config)
+        sys.exit(0)  # Exit code 0 indicates success
+
 
     try:
         load_file(log_config)
