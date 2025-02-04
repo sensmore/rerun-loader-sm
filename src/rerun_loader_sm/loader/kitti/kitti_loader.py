@@ -79,13 +79,13 @@ def _parse_poses(filename: Path | ZipPath, calibration: dict[str, np.ndarray]) -
 def _load_poses(folder: Path | ZipPath) -> np.ndarray:
     path_pose = folder / "poses.txt"
     if not path_pose.exists():
-        msg = "poses.txt missing"
-        raise InputFormatError(msg)
+        msg = f"poses.txt missing at {path_pose}"
+        raise Exception(msg)
 
     path_calib = folder / "calib.txt"
     if not path_pose.exists():
-        msg = "calib.txt missing"
-        raise InputFormatError(msg)
+        msg = f"calib.txt missing at {path_calib}"
+        raise Exception(msg)
 
     calib = _parse_calibration(path_calib)
     return _parse_poses(path_pose, calib)
@@ -137,8 +137,9 @@ class KittiLoader(CloudLoader):
     def poses(self) -> np.ndarray:
         return _load_poses(self.path)
 
-    def get_cloud(self, idx: int) -> np.ndarray | None:
-        return read_kitti_bin(self.cloud_folder / f"{idx:06}.bin")
+    def get_cloud(self, idx: int, cloud_folder:Path | None= None) -> np.ndarray | None:
+        cloud_folder = cloud_folder if cloud_folder is not None else self.cloud_folder
+        return read_kitti_bin(cloud_folder / f"{idx:06}.bin")
 
     def get_label(self, idx: int) -> tuple[np.ndarray, np.ndarray] | None:
         return _read_kitti_label(self.label_folder / f"{idx:06}.label")
@@ -164,7 +165,7 @@ class KittiLoader(CloudLoader):
                 self._zip_update[f"{self.label_folder.at}{idx:06}.label"] = buffer
 
     def get_secondary_cloud(self, idx: int) -> np.ndarray | None:
-        return read_kitti_bin(self.secondary_cloud_folder / f"{idx:06}.bin")
+        return self.get_cloud(self, self.secondary_cloud_folder)
 
     def get_box_label(self, idx: int) -> np.ndarray | None:
         return _read_box_label(self.box_folder / f"{idx:06}.txt")

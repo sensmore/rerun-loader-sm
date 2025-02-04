@@ -15,6 +15,8 @@ import traceback
 import pickle
 from abc import ABC, abstractmethod
 
+from itertools import islice
+
 
 
 from rerun_loader_sm.loader.kitti.kitti_loader import read_kitti_bin, KittiLoader
@@ -176,6 +178,12 @@ def _load_kitti_hdf5_clouds(cloud_folder:Path, idx:int)->None | list[tuple[str, 
     return _load_hdf5_clouds(clouds_files[0])
 
 
+def is_dir_containing_files_with(dir:Path, file_predicate)->bool:
+    print(dir)
+    # only test at most 10
+    # TODO: improve - maybe first filter by extension
+    return any(islice((file_predicate(file) for file in dir.iterdir() if file.is_file()), 10))
+
 
 def find_subdirs_with_files(parent_dir, file_predicate)->list[Path]:
     """
@@ -186,11 +194,8 @@ def find_subdirs_with_files(parent_dir, file_predicate)->list[Path]:
     subdirs_with_files = []
 
     for subdir in parent_path.iterdir():
-        if subdir.is_dir():
-            contains_target_files = any(file_predicate(file) for file in subdir.iterdir() if file.is_file())
-            if contains_target_files:
+        if subdir.is_dir() and is_dir_containing_files_with(subdir, file_predicate):
                 subdirs_with_files.append(subdir)
-
     return subdirs_with_files
 
 
@@ -236,10 +241,79 @@ def is_hdf5_file(filepath: Path):
     except (OSError, IOError) as e:
         return False
 
+def is_kitti_bin_file(filepath: Path):
+    return filepath.is_file() and filepath.suffix == ".bin"
+
 def is_npy_file(file_path):
     return file_path.is_file() and file_path.suffix == '.npy'
 
+def _log_kitti_dir_to_rerun(log_config: LogConfig, poses_path:Path, cloud_dirs: List[Path] = None, 
+                            hdf5_cloud_dirs:List[Path] = None):
+        cloud_dirs = [ ] if cloud_dirs is None else cloud_dirs
+        hdf5_cloud_dirs = [ ] if hdf5_cloud_dirs is None else hdf5_cloud_dirs
+        assert isinstance(cloud_dirs, List)
+        assert isinstance(hdf5_cloud_dirs, List)
+        cloud_dirs = cloud_dirs or []
+        hdf5_cloud_dirs = hdf5_cloud_dirs or []
+        
+        filepath = Path(poses_path.absolute().parent)
+        kitti_loader = _create_kitti_loader(filepath)
+        logging.info(f"Loading KITTI dataset {filepath}")
+        
+        
+        poses = kitti_loader.poses
+        indices = np.arange(poses.shape[0])
+        indices = indices[ (indices>= log_config.loader_config.loader_kitti_config.cloud_start) & (indices<=log_config.loader_config.loader_kitti_config.cloud_end)]
+        logging.info(f"Logging kitti bin subdirectories: {cloud_dirs} with {indices}")
+        
+        # first iterate over index, then over clouds so we see all clouds at the same time
+        for idx in indices:
+            pose = poses[idx, ...]
+            
+            for cloud_dir in cloud_dirs:
+            # Load the "normal" cloud of the kitti data
+                points_xyzi = kitti_loader.get_cloud(idx, cloud_dir)
+                if points_xyzi is not None:
+                    points_xyz = points_xyzi[:,:3]
+                    # easy to read by unnessary double transpose
+                    points_xyz_transformed = _homegenous_to_cartesian_rows((pose @ _cartesian_to_homogenous_rows(points_xyz).T).T)
+                    log_dynamic_cloud_by_sequence_idx(log_config, key = str(cloud_dir), seq_idx=idx, points_xyz = points_xyz_transformed)
+
+        logging.info(f"Logging HDF5 subdirectories {hdf5_cloud_dirs} with indincess {indices}")
+        for hdf5_subdir in hdf5_cloud_dirs:
+            for idx in indices:
+                pose = poses[idx, ...]
+                rel_path = hdf5_subdir.relative_to(filepath)
+                
+                # Load the "normal" cloud of the kitti data
+                clouds = _load_kitti_hdf5_clouds(hdf5_subdir, idx)
+                if clouds is None:
+                    continue
+                for key, cloud_xyzi in clouds:
+                    _log_dynamic_cloud_with_pose(log_config, key=str(rel_path / key), seq_idx=idx, pose=pose, points_xyzi=cloud_xyzi)
+    
+
+class KittiCloudDirectoryRerunLoader(DatasetRerunLoader):
+    '''Specify a cloud direcoty in kitti subset and just log this'''
+    
+    @staticmethod
+    def is_loadable(filepath:Path):
+        logging.info(f"Checking if {filepath} is kitti cloud directory")
+        if not filepath.is_dir():
+            logging.info("Not a kitti cloud folder since no directory")
+            return False
+        kitti_cloud_dir = Path(filepath).absolute().parent
+        logging.info(f"Checking if {kitti_cloud_dir} is kitti base dir")
+        return KittiSequenceDatasetRerunLoader.is_loadable(kitti_cloud_dir)
+    
+    def log_to_rerun(self, log_config: LogConfig):
+        cloud_dir = Path(log_config.filepath)
+        kitti_cloud_dir = Path(cloud_dir).absolute().parent
+        _log_kitti_dir_to_rerun(log_config, 
+                                kitti_cloud_dir / 'poses.txt', cloud_dirs=[cloud_dir])
+
 class KittiSequenceDatasetRerunLoader(DatasetRerunLoader):
+    '''Log all the clouds in a kitti sequence dataset; not just a subdirectory with clouds'''
     
     @staticmethod
     def is_loadable(filepath:Path):
@@ -258,41 +332,13 @@ class KittiSequenceDatasetRerunLoader(DatasetRerunLoader):
         return is_loadable
     
     def log_to_rerun(self, log_config: LogConfig):
-        filepath = Path(log_config.filepath)
-        kitti_loader = _create_kitti_loader(filepath)
-        logging.info("Loading KITTI dataset")
+        kitti_base_dir_path = Path(log_config.filepath)
+        logging.info("Loading complete KITTI sequence")
         
-        
-        poses = kitti_loader.poses
-        indices = np.array(_get_numbers_from_numerated_files(kitti_loader.cloud_folder))
-        indices = indices[ (indices>= log_config.loader_config.loader_kitti_config.cloud_start) & (indices<=log_config.loader_config.loader_kitti_config.cloud_end)]
-        logging.info(f"Logging numpy subdirectories: {kitti_loader.cloud_folder} with {indices}")
-        
-        for idx in indices:
-            pose = poses[idx, ...]
-            
-            # Load the "normal" cloud of the kitti data
-            points_xyzi = kitti_loader.get_cloud(idx)
-            if points_xyzi is not None:
-                points_xyz = points_xyzi[:,:3]
-                # easy to read by unnessary double transpose
-                points_xyz_transformed = _homegenous_to_cartesian_rows((pose @ _cartesian_to_homogenous_rows(points_xyz).T).T)
-                log_dynamic_cloud_by_sequence_idx(log_config, key = str(kitti_loader.cloud_folder), seq_idx=idx, points_xyz = points_xyz_transformed)
-
-        hdf5_subdirs = find_subdirs_with_files(filepath, is_hdf5_file)
-        logging.info(f"Logging HDF5 subdirectories {hdf5_subdirs} with indincess {indices}")
-        for hdf5_subdir in hdf5_subdirs:
-            for idx in indices:
-                pose = poses[idx, ...]
-                rel_path = hdf5_subdir.relative_to(filepath)
-                
-                # Load the "normal" cloud of the kitti data
-                clouds = _load_kitti_hdf5_clouds(hdf5_subdir, idx)
-                if clouds is None:
-                    continue
-                for key, cloud_xyzi in clouds:
-                    _log_dynamic_cloud_with_pose(log_config, key=str(rel_path / key), seq_idx=idx, pose=pose, points_xyzi=cloud_xyzi)
-
+        cloud_folders = find_subdirs_with_files(kitti_base_dir_path, is_kitti_bin_file)
+        hdf5_cloud_folders = find_subdirs_with_files(kitti_base_dir_path, is_hdf5_file)
+        logging.info(f"Logging kitti with cloud_folders={cloud_folders} and hdf5_cloud_folders={hdf5_cloud_folders}")
+        _log_kitti_dir_to_rerun(log_config, kitti_base_dir_path / 'poses.txt', cloud_folders, hdf5_cloud_folders)
 class KittiSingleCloudFileRerunLoader(DatasetRerunLoader):
     
     @staticmethod
@@ -468,6 +514,7 @@ def load_file(log_config: LogConfig):
     rerun_data_loader_classes = [
         PythonFileRerunLoader,
         PickledDictRerunLoader,
+        KittiCloudDirectoryRerunLoader,
         KittiSequenceDatasetRerunLoader,
         KittiSingleCloudFileRerunLoader,
         HD5CloudRerunLoader,
@@ -590,6 +637,8 @@ def run(standalone=False):
         loader_config=loader_config or default_log_config.loader_config
     )
     
+    
+    
     if args.addr is not None:
         log_config.loader_config.connection.address = args.addr
 
@@ -606,8 +655,9 @@ def run(standalone=False):
                     spawn=True)
         else:
             rr.init(log_config.application_id, recording_id=log_config.recording_id)
-            logging.info(f"Connect to existing rerun at {con_config.address}")
-            rr.connect_tcp(con_config.address)
+            address = log_config.loader_config.connection
+            logging.info(f"Connect to existing rerun at {address}")
+            rr.connect_tcp(address)
     else:
         logging.info("Starting rerun-loader-sm in data loader mode")
         rr.init(log_config.application_id, recording_id=log_config.recording_id)
