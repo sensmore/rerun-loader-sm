@@ -262,6 +262,9 @@ def _log_kitti_dir_to_rerun(log_config: LogConfig, poses_path:Path, cloud_dirs: 
         
         
         poses = kitti_loader.poses
+        translations = poses[:,0:3,3]
+        assert translations.shape[1] == 3, "translations shape must be (n,3)"
+        log_static_cloud(log_config, 'poses', translations)
         indices = np.arange(poses.shape[0])
         indices = indices[ (indices>= log_config.loader_config.loader_kitti_config.cloud_start) & (indices<=log_config.loader_config.loader_kitti_config.cloud_end)]
         logging.info(f"Logging kitti bin subdirectories: {cloud_dirs} with {indices}")
@@ -269,6 +272,7 @@ def _log_kitti_dir_to_rerun(log_config: LogConfig, poses_path:Path, cloud_dirs: 
         # first iterate over index, then over clouds so we see all clouds at the same time
         for idx in indices:
             pose = poses[idx, ...]
+            log_dynamic_cloud_by_sequence_idx(log_config, key = 'world/pose', seq_idx=idx, points_xyz = translations[idx])
             
             for cloud_dir in cloud_dirs:
             # Load the "normal" cloud of the kitti data
@@ -277,7 +281,7 @@ def _log_kitti_dir_to_rerun(log_config: LogConfig, poses_path:Path, cloud_dirs: 
                     points_xyz = points_xyzi[:,:3]
                     # easy to read by unnessary double transpose
                     points_xyz_transformed = _homegenous_to_cartesian_rows((pose @ _cartesian_to_homogenous_rows(points_xyz).T).T)
-                    log_dynamic_cloud_by_sequence_idx(log_config, key = str(cloud_dir), seq_idx=idx, points_xyz = points_xyz_transformed)
+                    log_dynamic_cloud_by_sequence_idx(log_config, key = 'world/' + str(cloud_dir), seq_idx=idx, points_xyz = points_xyz_transformed)
 
         logging.info(f"Logging HDF5 subdirectories {hdf5_cloud_dirs} with indincess {indices}")
         for hdf5_subdir in hdf5_cloud_dirs:
