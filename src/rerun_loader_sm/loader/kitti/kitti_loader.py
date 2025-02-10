@@ -90,6 +90,12 @@ def _load_poses(folder: Path | ZipPath) -> np.ndarray:
     calib = _parse_calibration(path_calib)
     return _parse_poses(path_pose, calib)
 
+def _load_times(folder: Path | ZipPath) -> np.ndarray:
+    path_times = folder / "times.txt"
+    if not path_times.exists():
+        msg = "times.txt missing"
+        raise InputFormatError(msg)
+    return np.loadtxt(path_times, dtype=np.float64)
 
 class KittiLoader(CloudLoader):
     def __init__(
@@ -136,6 +142,10 @@ class KittiLoader(CloudLoader):
     @property
     def poses(self) -> np.ndarray:
         return _load_poses(self.path)
+
+    @property
+    def times(self) -> np.ndarray:
+        return _load_times(self.path)
 
     def get_cloud(self, idx: int, cloud_folder:Path | None= None) -> np.ndarray | None:
         cloud_folder = cloud_folder if cloud_folder is not None else self.cloud_folder

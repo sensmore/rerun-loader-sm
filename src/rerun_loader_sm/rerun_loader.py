@@ -121,6 +121,18 @@ def log_static_cloud(log_config:LogConfig, key:str, points_xyz:np.array, points_
         timeless=True
     )
 
+# TODO: trash!
+def log_points_dynamics(log_config:LogConfig, key:str, points_xyz:np.array, times:np.array):
+    path = get_path(log_config, key)
+    for i in range(times.shape[0]):
+        time = times[i]
+        point = points_xyz[i, :]
+        rr.set_time_sequence("frame_nr", i)
+        rr.log(
+            path,
+            rr.Points3D(point, radii=3.0, colors=[0, 255, 0]),
+        )
+
 def log_dynamic_cloud_by_sequence_idx(log_config:LogConfig, key:str, seq_idx:int, points_xyz:np.array, points_intensity:Optional[np.ndarray]=None):
     logging.debug(f"Log cloud {points_xyz.shape} at sequence id {seq_idx}" )
     rr.set_time_sequence("frame_nr", seq_idx)
@@ -264,7 +276,8 @@ def _log_kitti_dir_to_rerun(log_config: LogConfig, poses_path:Path, cloud_dirs: 
         poses = kitti_loader.poses
         translations = poses[:,0:3,3]
         assert translations.shape[1] == 3, "translations shape must be (n,3)"
-        log_static_cloud(log_config, 'poses', translations)
+        log_static_cloud(log_config, 'world/poses', translations)
+        log_points_dynamics(log_config, 'world/pose_dynamic', translations, kitti_loader.times)
         indices = np.arange(poses.shape[0])
         indices = indices[ (indices>= log_config.loader_config.loader_kitti_config.cloud_start) & (indices<=log_config.loader_config.loader_kitti_config.cloud_end)]
         logging.info(f"Logging kitti bin subdirectories: {cloud_dirs} with {indices}")
@@ -295,7 +308,7 @@ def _log_kitti_dir_to_rerun(log_config: LogConfig, poses_path:Path, cloud_dirs: 
                     continue
                 for key, cloud_xyzi in clouds:
                     _log_dynamic_cloud_with_pose(log_config, key=str(rel_path / key), seq_idx=idx, pose=pose, points_xyzi=cloud_xyzi)
-    
+
 
 class KittiCloudDirectoryRerunLoader(DatasetRerunLoader):
     '''Specify a cloud direcoty in kitti subset and just log this'''
@@ -435,6 +448,69 @@ class PickledDictRerunLoader(DatasetRerunLoader):
                 )
         logging.info("Loading pickeled dict done")
 
+
+class GenericHDF5(DatasetRerunLoader):
+    
+    @staticmethod
+    def is_loadable(filepath:Path):
+        """
+        Check if a given file is a valid HDF5 file.
+
+        Parameters:
+            filepath (str): The path to the file to check.
+
+        Returns:
+            bool: True if the file is a valid HDF5 file, False otherwise.
+        """
+        try:
+            with h5py.File(str(filepath), "r") as _:
+                logging.info(f"{filepath} is hdf5 file")
+                return True
+        except (OSError, IOError) as e:
+            logging.debug(f"Error: {e}")
+            logging.info(f"Not a hdf5 file: {str(filepath)}")
+            return False
+    
+    def _rr_log_hd5_dataset(self, dataset:h5py.Dataset, log_config: LogConfig):
+        # log whole dataset as table/textual to rerun
+        # not implemented yet
+        pass
+
+    def _log_keys(self, hf:h5py.File, key: str, log_config: LogConfig):
+        """
+        Load a dataset from an open HDF5 file.
+
+        Parameters:
+            hf (h5py.File): Open HDF5 file object.
+            key (str): Key of the dataset to load.
+        """
+        if key in hf:
+            data = hf[key]
+            if isinstance(data, h5py.Dataset):
+                logging.info(f"Dataset {key} with shape {data.shape}")
+                logging.info(data[:5])
+                self._rr_log_hd5_dataset(data, log_config)
+            else:
+                logging.info(f"Element {key} of type shape {type(data)}")
+        else:
+            raise KeyError(f"Dataset key '{key}' not found in the file.")
+    
+    def log_to_rerun(self, log_config: LogConfig):
+        """
+        Open an HDF5 file, iterate over its keys, and load datasets.
+        """
+        logging.info(f"Opening HDF5 file: {log_config.filepath}")
+        try:
+            with h5py.File(log_config.filepath, "r") as hf:
+                keys = list(hf.keys())
+                logging.info(f"HDF5 Keys: {list(hf.keys())}")
+                for key in keys:
+                    self._log_keys(hf, key, log_config)
+        except Exception as e:
+            print(f"Error opening file: {e}")
+
+
+
     
 class HD5CloudRerunLoader(DatasetRerunLoader):
     
@@ -521,7 +597,8 @@ def load_file(log_config: LogConfig):
         KittiCloudDirectoryRerunLoader,
         KittiSequenceDatasetRerunLoader,
         KittiSingleCloudFileRerunLoader,
-        HD5CloudRerunLoader,
+        # HD5CloudRerunLoader,
+        GenericHDF5,
     ]
     loader_classes_by_name = {cls.__name__: cls for cls in rerun_data_loader_classes}
     logging.info(f"Consider rerun data loaders: {list(loader_classes_by_name.keys())}")
